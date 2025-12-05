@@ -14,6 +14,10 @@ public:
 
     void setUserId(const std::string& userId);
 
+    // Public methods to control monitoring externally (for system tray)
+    void triggerStartMonitoring();
+    void triggerStopMonitoring();
+
 private:
     std::string userId;
     std::string statusMessage;

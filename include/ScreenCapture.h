@@ -4,15 +4,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
-
-// Forward declarations for FFmpeg structures
-extern "C" {
-    struct AVFormatContext;
-    struct AVCodecContext;
-    struct AVFrame;
-    struct AVCodec;
-    struct SwsContext;
-}
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -41,32 +33,35 @@ private:
     std::thread recordingThread;
     std::function<void(const std::string&)> screenshotCallback;
 
-    // FFmpeg related members for recording
-    AVFormatContext* formatContext;
-    AVCodecContext* codecContext;
-    AVFrame* videoFrame;
-    AVCodec* videoCodec;
-    SwsContext* swsContext;
-    std::string outputFile;
-
     // Screen dimensions (to be captured during initialization)
     int screenWidth;
     int screenHeight;
+
+    // For external FFmpeg recording
+    std::string outputFile;
+    std::string tempFrameDir;
+    int frameCounter;
+    std::vector<std::string> capturedFrameFiles;
+
+    // GDI+ variables
+    ULONG_PTR gdiplusToken;
 
     // Platform-specific implementation
     std::string captureScreenWindows();
     std::string captureScreenLinux();
     std::string captureScreenMac();
 
-    // Recording functions
-    bool initializeRecording(const std::string& outputFilePath);
+    // Recording functions using external FFmpeg
     void recordingLoop();
-    bool prepareVideoFrame();
-    bool encodeVideoFrame();
-    void cleanupRecording();
+    bool captureFrame();
+    void encodeVideoWithExternalFFmpeg();
+    void createTempFrameDirectory();
+    void cleanupTempFiles();
 
-    // Windows-specific functions for continuous capture
-    bool captureFrameWindows();
+    // Windows-specific functions
+    bool captureFrameWindows(const std::string& filePath);
+    bool captureFrameLinux(const std::string& filePath);
+    bool captureFrameMac(const std::string& filePath);
 
 #ifdef _WIN32
     // Helper function for getting encoder CLSID

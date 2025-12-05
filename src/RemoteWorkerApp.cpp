@@ -18,7 +18,19 @@
 
 #include <iostream>
 
+// Include tray library if available
+#ifndef NO_TRAY_LIBRARY
+#ifdef USE_TRAY_LIBRARY
+#include "tray.h"
+#endif
+#endif
+
 RemoteWorkerApp::RemoteWorkerApp() : window(nullptr), currentState(AppState::LOGIN) {
+#ifndef NO_TRAY_LIBRARY
+#ifdef USE_TRAY_LIBRARY
+    trayMenu = nullptr;
+#endif
+#endif
     initialize();
 }
 
@@ -76,7 +88,59 @@ void RemoteWorkerApp::initialize() {
     // Initialize screens
     loginScreen = std::make_unique<::LoginScreen>();
     monitoringScreen = std::make_unique<::MonitoringScreen>();
+
+#ifndef NO_TRAY_LIBRARY
+#ifdef USE_TRAY_LIBRARY
+    setupSystemTray();
+#endif
+#endif
 }
+
+#ifndef NO_TRAY_LIBRARY
+#ifdef USE_TRAY_LIBRARY
+void RemoteWorkerApp::trayCallback(struct tray_menu* menu) {
+    RemoteWorkerApp* app = static_cast<RemoteWorkerApp*>(menu->context);
+
+    if (strcmp(menu->text, "Show Window") == 0) {
+        glfwShowWindow(app->window);
+    } else if (strcmp(menu->text, "Start Monitoring") == 0) {
+        if (app->currentState == AppState::MONITORING) {
+            app->monitoringScreen->triggerStartMonitoring();
+        }
+    } else if (strcmp(menu->text, "Stop Monitoring") == 0) {
+        if (app->currentState == AppState::MONITORING) {
+            app->monitoringScreen->triggerStopMonitoring();
+        }
+    } else if (strcmp(menu->text, "Exit") == 0) {
+        glfwSetWindowShouldClose(app->window, GLFW_TRUE);
+    }
+}
+
+void RemoteWorkerApp::setupSystemTray() {
+    static struct tray_menu menu_items[] = {
+        {.text = "Show Window", .cb = RemoteWorkerApp::trayCallback, .context = nullptr},
+        {.text = "Start Monitoring", .cb = RemoteWorkerApp::trayCallback, .context = nullptr},
+        {.text = "Stop Monitoring", .cb = RemoteWorkerApp::trayCallback, .context = nullptr},
+        {.text = "-", .cb = nullptr, .context = nullptr},  // Separator
+        {.text = "Exit", .cb = RemoteWorkerApp::trayCallback, .context = nullptr},
+        {}
+    };
+
+    // Set the context to this instance so the callback can access the app
+    for (int i = 0; i < 5; i++) {  // Update the first 5 elements
+        if (menu_items[i].text && strlen(menu_items[i].text) > 0 && menu_items[i].text[0] != '-') {
+            menu_items[i].context = this;
+        }
+    }
+
+    if (tray_init(menu_items) != 0) {
+        std::cerr << "Failed to initialize system tray" << std::endl;
+    } else {
+        std::cout << "System tray initialized successfully" << std::endl;
+    }
+}
+#endif
+#endif
 
 void RemoteWorkerApp::render() {
     // Start the Dear ImGui frame
@@ -118,6 +182,7 @@ void RemoteWorkerApp::cleanup() {
     glfwDestroyWindow(window);
     glfwTerminate();
 }
+
 
 void RemoteWorkerApp::run() {
     std::cout << "Remote Worker App starting..." << std::endl;

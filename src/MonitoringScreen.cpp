@@ -127,12 +127,26 @@ void MonitoringScreen::setUserId(const std::string& id) {
     userId = id;
 }
 
+void MonitoringScreen::triggerStartMonitoring() {
+    if (currentState == MonitoringState::STOPPED) {
+        startMonitoring();
+        currentState = MonitoringState::RUNNING;
+    }
+}
+
+void MonitoringScreen::triggerStopMonitoring() {
+    if (currentState != MonitoringState::STOPPED) {
+        stopMonitoring();
+        currentState = MonitoringState::STOPPED;
+    }
+}
+
 void MonitoringScreen::startMonitoring() {
     statusMessage = "Monitoring started...";
-    
+
     // Start random screenshot timer
     startRandomScreenshotTimer();
-    
+
     // Here you would start other monitoring components
     std::cout << "Monitoring started for user: " << userId << std::endl;
 }
