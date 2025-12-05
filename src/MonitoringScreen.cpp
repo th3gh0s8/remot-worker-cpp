@@ -12,7 +12,7 @@
 #include <random>
 #include <iostream>
 
-MonitoringScreen::MonitoringScreen() : timerRunning(false) {
+MonitoringScreen::MonitoringScreen() : timerRunning(false), currentState(MonitoringState::STOPPED), isRecording(false) {
     // Initialize monitoring components
 }
 
@@ -25,11 +25,9 @@ MonitoringScreen::~MonitoringScreen() {
 void MonitoringScreen::render() {
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_Always);
-    
+
     ImGui::Begin("Work Monitoring Dashboard", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
-    
-    static MonitoringState currentState = MonitoringState::STOPPED;
-    
+
     // Control buttons
     if (currentState == MonitoringState::STOPPED) {
         if (ImGui::Button("Start Monitoring")) {
@@ -55,27 +53,73 @@ void MonitoringScreen::render() {
             currentState = MonitoringState::STOPPED;
         }
     }
-    
+
+    // Additional functionality buttons
+    ImGui::Separator();
+    if (ImGui::Button("Take Screenshot Now")) {
+        ScreenCapture screenCapture;
+        std::string screenshotPath = screenCapture.captureScreen();
+
+        if (!screenshotPath.empty()) {
+            // Upload screenshot
+            FileUploader uploader;
+            uploader.setServerCredentials("localhost", "root", "");
+            uploader.uploadFile(screenshotPath, "/screenshots/" + userId + "/");
+
+            // Record to database
+            DatabaseManager dbManager;
+            dbManager.connect("localhost", "root", "", "worker_db");
+            dbManager.insertActivityData(userId, "manual_screenshot_taken");
+
+            statusMessage = "Manual screenshot taken: " + screenshotPath;
+        } else {
+            statusMessage = "Failed to take screenshot";
+        }
+    }
+
+    if (!isRecording) {
+        if (ImGui::Button("Start Recording")) {
+            ScreenCapture screenCapture;
+            std::string recordingPath = "recording_" + userId + ".mp4";
+            if (screenCapture.startRecording(recordingPath)) {
+                isRecording = true;
+                statusMessage = "Started recording: " + recordingPath;
+            } else {
+                statusMessage = "Failed to start recording";
+            }
+        }
+    } else {
+        if (ImGui::Button("Stop Recording")) {
+            ScreenCapture screenCapture;
+            if (screenCapture.stopRecording()) {
+                isRecording = false;
+                statusMessage = "Stopped recording";
+            } else {
+                statusMessage = "Failed to stop recording";
+            }
+        }
+    }
+
     // Status information
     ImGui::Separator();
-    ImGui::Text("Status: %s", 
-        currentState == MonitoringState::RUNNING ? "Running" : 
+    ImGui::Text("Status: %s",
+        currentState == MonitoringState::RUNNING ? "Running" :
         currentState == MonitoringState::PAUSED ? "Paused" : "Stopped");
-    
+
     if (!statusMessage.empty()) {
         ImGui::Text("Info: %s", statusMessage.c_str());
     }
-    
+
     // Show some stats
     UserActivity userActivity;
     bool isIdle = userActivity.isUserIdle(300); // 5 minutes threshold
     ImGui::Text("User Status: %s", isIdle ? "Idle" : "Active");
-    
+
     NetworkMonitor networkMonitor;
     auto networkUsage = networkMonitor.getNetworkUsage();
-    ImGui::Text("Network Usage - Sent: %llu bytes, Received: %llu bytes", 
+    ImGui::Text("Network Usage - Sent: %llu bytes, Received: %llu bytes",
                 networkUsage.bytesSent, networkUsage.bytesReceived);
-    
+
     ImGui::End();
 }
 
@@ -95,10 +139,17 @@ void MonitoringScreen::startMonitoring() {
 
 void MonitoringScreen::stopMonitoring() {
     statusMessage = "Monitoring stopped.";
-    
+
     // Stop random screenshot timer
     stopRandomScreenshotTimer();
-    
+
+    // Stop any ongoing recording
+    if (isRecording) {
+        ScreenCapture screenCapture;
+        screenCapture.stopRecording();
+        isRecording = false;
+    }
+
     std::cout << "Monitoring stopped for user: " << userId << std::endl;
 }
 
