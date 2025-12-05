@@ -5,6 +5,9 @@
 #include <atomic>
 #include "AppState.h"  // Include to get MonitoringState definition
 
+// Forward declaration to avoid circular dependencies
+class ScreenCapture;
+
 class MonitoringScreen {
 public:
     MonitoringScreen();
@@ -27,6 +30,9 @@ private:
     // For the random screenshot timer
     std::thread screenshotTimerThread;
     std::atomic<bool> timerRunning;
+
+    // For screen recording functionality
+    ScreenCapture* screenCapture;
 
     void startMonitoring();
     void stopMonitoring();

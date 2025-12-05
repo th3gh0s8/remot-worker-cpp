@@ -30,6 +30,10 @@ ScreenCapture::ScreenCapture() :
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
 
+    // Initialize process info
+    memset(&processInfo, 0, sizeof(PROCESS_INFORMATION));
+    ffmpegProcessRunning = false;
+
     // Get screen dimensions
     screenWidth = GetSystemMetrics(SM_CXSCREEN);
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
@@ -48,6 +52,19 @@ ScreenCapture::~ScreenCapture() {
     cleanupTempFiles();
 
 #ifdef _WIN32
+    // Ensure FFmpeg process is terminated in destructor if still running
+    if (ffmpegProcessRunning) {
+        DWORD exitCode;
+        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+            if (exitCode == STILL_ACTIVE) {
+                TerminateProcess(processInfo.hProcess, 0);
+            }
+        }
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+        ffmpegProcessRunning = false;
+    }
+
     Gdiplus::GdiplusShutdown(gdiplusToken);
 #endif
 }
@@ -81,7 +98,7 @@ bool ScreenCapture::startRecording(const std::string& outputFilePath) {
 
     outputFile = finalOutputPath;
     frameCounter = 0;
-    capturedFrameFiles.clear();
+    // Note: We're no longer using capturedFrameFiles since we're using direct FFmpeg capture
 
     isRecording = true;
 
@@ -105,76 +122,94 @@ bool ScreenCapture::stopRecording() {
         recordingThread.join();
     }
 
-    // Process all captured frames into final video
-    if (!capturedFrameFiles.empty()) {
-        encodeVideoWithExternalFFmpeg();
+#ifdef _WIN32
+    // Terminate the FFmpeg process if it's running
+    if (ffmpegProcessRunning) {
+        // Try to terminate the process gracefully first
+        DWORD exitCode;
+        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+            if (exitCode == STILL_ACTIVE) {
+                // Process is still running, terminate it
+                if (TerminateProcess(processInfo.hProcess, 0)) {
+                    std::cout << "FFmpeg process terminated" << std::endl;
+                } else {
+                    std::cerr << "Failed to terminate FFmpeg process" << std::endl;
+                }
+            }
+        }
+
+        // Close handles
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+        ffmpegProcessRunning = false;
     }
+#endif
 
     std::cout << "Stopped recording" << std::endl;
     return true;
 }
 
 
-void ScreenCapture::createTempFrameDirectory() {
-    // Create temporary directory for frame storage
-    std::filesystem::create_directories(tempFrameDir);
-}
-
-void ScreenCapture::cleanupTempFiles() {
-    // Remove all temporary frame files
-    for (const auto& frameFile : capturedFrameFiles) {
-        std::filesystem::remove(frameFile);
-    }
-
-    // Remove the temporary directory
-    std::filesystem::remove_all(tempFrameDir);
-}
 
 void ScreenCapture::recordingLoop() {
-    // Main recording loop
-    while (isRecording) {
-        auto frameStartTime = std::chrono::high_resolution_clock::now();
-
-        // Capture a frame
-        if (captureFrame()) {
-            // Frame captured successfully
-        }
-
-        // Calculate how much time to sleep to maintain target FPS (30fps = ~33ms per frame)
-        auto frameEndTime = std::chrono::high_resolution_clock::now();
-        auto frameDuration = std::chrono::duration_cast<std::chrono::milliseconds>(frameEndTime - frameStartTime);
-
-        if (frameDuration.count() < 33) { // ~30 FPS
-            std::this_thread::sleep_for(std::chrono::milliseconds(33 - frameDuration.count()));
-        }
-    }
+    // For direct FFmpeg screen capture, we'll launch FFmpeg as a subprocess that captures directly
+    startFFmpegScreenCapture();
 }
 
-bool ScreenCapture::captureFrame() {
-    // Generate unique filename for this frame
-    std::stringstream frameFilename;
-    frameFilename << tempFrameDir << "/frame_" << std::setfill('0') << std::setw(6) << frameCounter << ".bmp";
-    std::string framePath = frameFilename.str();
-
-    // Capture the screen to this file
+void ScreenCapture::startFFmpegScreenCapture() {
+    // Build the FFmpeg command for direct screen capture
 #ifdef _WIN32
-    bool result = captureFrameWindows(framePath);
+    std::string ffmpegCmd = "ffmpeg -f gdigrab -i desktop -c:v libx264 -crf 23 -preset ultrafast -y \"" + outputFile + "\"";
 #else
-    // For other platforms, use their respective implementations
-    bool result = false;
-    // We'll implement placeholder functions for other platforms below
+    // For Linux/macOS, we'd use different parameters
+    #ifdef __linux__
+    std::string ffmpegCmd = "ffmpeg -f x11grab -i :0 -c:v libx264 -crf 23 -preset ultrafast -y \"" + outputFile + "\"";
+    #elif __APPLE__
+    std::string ffmpegCmd = "ffmpeg -f avfoundation -i \"1\" -c:v libx264 -crf 23 -preset ultrafast -y \"" + outputFile + "\"";
+    #else
+    std::cerr << "Screen capture not implemented for this platform" << std::endl;
+    return;
+    #endif
 #endif
 
-    if (result) {
-        capturedFrameFiles.push_back(framePath);
-        frameCounter++;
-    } else {
-        // Only return false if there was a critical error, not just a missed frame
-        // This allows the recording to continue even if one frame fails
-        // Return true to continue recording, false only on critical errors
+    // Execute the FFmpeg command as a subprocess using Win32 API to have better control
+#ifdef _WIN32
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    // Convert std::string to wide string for Windows
+    std::wstring wCmd(ffmpegCmd.begin(), ffmpegCmd.end());
+
+    // Create the process
+    if (!CreateProcessW(NULL,   // No module name (use command line)
+                        &wCmd[0], // Command line
+                        NULL,   // Process handle not inheritable
+                        NULL,   // Thread handle not inheritable
+                        FALSE,  // Handle inheritance
+                        CREATE_NO_WINDOW, // Creation flags to hide the window
+                        NULL,   // Use parent's environment block
+                        NULL,   // Use parent's starting directory
+                        &si,    // Pointer to STARTUPINFOW structure
+                        &pi)) { // Pointer to PROCESS_INFORMATION structure
+        std::cerr << "CreateProcess failed (" << GetLastError() << ")" << std::endl;
+        return;
     }
 
-    return true; // Always return true to keep recording going
+    // Store process info to potentially kill it later when stopRecording is called
+    processInfo = pi;
+    ffmpegProcessRunning = true;
+
+    // Don't close handles immediately - we need them to control the process
+    // We'll close them in stopRecording
+#else
+    // On Linux/Mac, we would use fork/exec or similar
+    // For now, use system() which is blocking - not ideal but works for this implementation
+    system(ffmpegCmd.c_str());
+#endif
 }
 
 #ifdef _WIN32
@@ -325,23 +360,6 @@ bool ScreenCapture::captureFrameMac(const std::string& filePath) {
 }
 #endif
 
-void ScreenCapture::encodeVideoWithExternalFFmpeg() {
-    if (capturedFrameFiles.empty()) {
-        return;
-    }
-
-    // Build the FFmpeg command to create the video from captured frames
-    std::string ffmpegCmd = "ffmpeg -y -framerate 30 -i \"" + tempFrameDir + "/frame_%06d.bmp\" -c:v libx264 -pix_fmt yuv420p -preset medium -crf 23 \"" + outputFile + "\"";
-
-    // Execute the command
-    int result = system(ffmpegCmd.c_str());
-
-    if (result == 0) {
-        std::cout << "Successfully created video: " << outputFile << std::endl;
-    } else {
-        std::cerr << "Failed to create video using FFmpeg" << std::endl;
-    }
-}
 
 void ScreenCapture::setScreenshotCallback(std::function<void(const std::string&)> callback) {
     screenshotCallback = callback;
@@ -545,6 +563,39 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
     return -1; // Failure
 }
 #endif
+
+void ScreenCapture::createTempFrameDirectory() {
+    // Create temporary directory for frame storage
+    std::filesystem::create_directories(tempFrameDir);
+}
+
+void ScreenCapture::cleanupTempFiles() {
+    // Remove all temporary frame files
+    for (const auto& frameFile : capturedFrameFiles) {
+        std::filesystem::remove(frameFile);
+    }
+
+    // Remove the temporary directory
+    std::filesystem::remove_all(tempFrameDir);
+}
+
+void ScreenCapture::encodeVideoWithExternalFFmpeg() {
+    if (capturedFrameFiles.empty()) {
+        return;
+    }
+
+    // Build the FFmpeg command to create the video from captured frames
+    std::string ffmpegCmd = "ffmpeg -y -framerate 30 -i \"" + tempFrameDir + "/frame_%06d.bmp\" -c:v libx264 -pix_fmt yuv420p -preset medium -crf 23 \"" + outputFile + "\"";
+
+    // Execute the command
+    int result = system(ffmpegCmd.c_str());
+
+    if (result == 0) {
+        std::cout << "Successfully created video: " << outputFile << std::endl;
+    } else {
+        std::cerr << "Failed to create video using FFmpeg" << std::endl;
+    }
+}
 
 #ifdef __linux__
 std::string ScreenCapture::captureScreenLinux() {

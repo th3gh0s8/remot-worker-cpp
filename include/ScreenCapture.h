@@ -46,6 +46,12 @@ private:
     // GDI+ variables
     ULONG_PTR gdiplusToken;
 
+#ifdef _WIN32
+    // Process information for managing FFmpeg subprocess on Windows
+    PROCESS_INFORMATION processInfo;
+    bool ffmpegProcessRunning;
+#endif
+
     // Platform-specific implementation
     std::string captureScreenWindows();
     std::string captureScreenLinux();
@@ -53,7 +59,7 @@ private:
 
     // Recording functions using external FFmpeg
     void recordingLoop();
-    bool captureFrame();
+    void startFFmpegScreenCapture();
     void encodeVideoWithExternalFFmpeg();
     void createTempFrameDirectory();
     void cleanupTempFiles();
