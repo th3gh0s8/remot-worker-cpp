@@ -14,6 +14,11 @@ enum class AppState {
 class LoginScreen;
 class MonitoringScreen;
 
+// Forward declaration for tray library (if using C library)
+#ifdef USE_TRAY_LIBRARY
+struct tray_menu;
+#endif
+
 class RemoteWorkerApp {
 public:
     RemoteWorkerApp();
@@ -31,4 +36,11 @@ private:
 
     std::unique_ptr<LoginScreen> loginScreen;
     std::unique_ptr<MonitoringScreen> monitoringScreen;
+
+#ifdef USE_TRAY_LIBRARY
+    // System tray functionality
+    void setupSystemTray();
+    static void trayCallback(struct tray_menu* menu);
+    struct tray_menu* trayMenu;
+#endif
 };

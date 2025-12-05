@@ -12,13 +12,26 @@
 #include <random>
 #include <iostream>
 
-MonitoringScreen::MonitoringScreen() : timerRunning(false), currentState(MonitoringState::STOPPED), isRecording(false) {
+MonitoringScreen::MonitoringScreen() : timerRunning(false), currentState(MonitoringState::STOPPED), isRecording(false), screenCapture(nullptr) {
     // Initialize monitoring components
+    screenCapture = new ScreenCapture();
 }
 
 MonitoringScreen::~MonitoringScreen() {
     if (timerRunning) {
         stopRandomScreenshotTimer();
+    }
+
+    // Stop recording if it's in progress
+    if (isRecording && screenCapture) {
+        screenCapture->stopRecording();
+        isRecording = false;
+    }
+
+    // Clean up the screen capture object
+    if (screenCapture) {
+        delete screenCapture;
+        screenCapture = nullptr;
     }
 }
 
@@ -79,9 +92,8 @@ void MonitoringScreen::render() {
 
     if (!isRecording) {
         if (ImGui::Button("Start Recording")) {
-            ScreenCapture screenCapture;
-            std::string recordingPath = "recording_" + userId + ".mp4";
-            if (screenCapture.startRecording(recordingPath)) {
+            std::string recordingPath = "recording_" + userId + ".mkv";
+            if (screenCapture->startRecording(recordingPath)) {
                 isRecording = true;
                 statusMessage = "Started recording: " + recordingPath;
             } else {
@@ -90,8 +102,7 @@ void MonitoringScreen::render() {
         }
     } else {
         if (ImGui::Button("Stop Recording")) {
-            ScreenCapture screenCapture;
-            if (screenCapture.stopRecording()) {
+            if (screenCapture->stopRecording()) {
                 isRecording = false;
                 statusMessage = "Stopped recording";
             } else {
@@ -127,12 +138,26 @@ void MonitoringScreen::setUserId(const std::string& id) {
     userId = id;
 }
 
+void MonitoringScreen::triggerStartMonitoring() {
+    if (currentState == MonitoringState::STOPPED) {
+        startMonitoring();
+        currentState = MonitoringState::RUNNING;
+    }
+}
+
+void MonitoringScreen::triggerStopMonitoring() {
+    if (currentState != MonitoringState::STOPPED) {
+        stopMonitoring();
+        currentState = MonitoringState::STOPPED;
+    }
+}
+
 void MonitoringScreen::startMonitoring() {
     statusMessage = "Monitoring started...";
-    
+
     // Start random screenshot timer
     startRandomScreenshotTimer();
-    
+
     // Here you would start other monitoring components
     std::cout << "Monitoring started for user: " << userId << std::endl;
 }
@@ -144,9 +169,8 @@ void MonitoringScreen::stopMonitoring() {
     stopRandomScreenshotTimer();
 
     // Stop any ongoing recording
-    if (isRecording) {
-        ScreenCapture screenCapture;
-        screenCapture.stopRecording();
+    if (isRecording && screenCapture) {
+        screenCapture->stopRecording();
         isRecording = false;
     }
 

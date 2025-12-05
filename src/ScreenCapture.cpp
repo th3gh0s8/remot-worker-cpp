@@ -1,15 +1,5 @@
 #include "ScreenCapture.h"
 
-#ifdef WITH_FFMPEG
-extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
-#include <libavutil/opt.h>
-#include <libswscale/swscale.h>
-}
-#endif
-
 #include <string>
 #include <functional>
 #include <chrono>
@@ -19,6 +9,14 @@ extern "C" {
 #include <vector>
 #include <thread>
 #include <mutex>
+#include <iomanip>    // For std::setfill, std::setw
+#include <process.h>  // For _spawnl on Windows
+#include <cstdlib>    // For system()
+#include <filesystem> // For file operations
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -27,22 +25,21 @@ extern "C" {
 #endif
 
 ScreenCapture::ScreenCapture() :
-#ifdef WITH_FFMPEG
-    formatContext(nullptr), codecContext(nullptr),
-    videoFrame(nullptr), videoCodec(nullptr), swsContext(nullptr),
-    screenWidth(0), screenHeight(0),
-#endif
-    isRecording(false), screenshotCallback(nullptr) {
+    isRecording(false), screenshotCallback(nullptr), recordingThread(), tempFrameDir("temp_frames"), gdiplusToken(0) {
 #ifdef _WIN32
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-    ULONG_PTR gdiplusToken;
     Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
 
-#ifdef WITH_FFMPEG
+    // Initialize process info
+    memset(&processInfo, 0, sizeof(PROCESS_INFORMATION));
+    ffmpegProcessRunning = false;
+
     // Get screen dimensions
     screenWidth = GetSystemMetrics(SM_CXSCREEN);
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
-#endif
+
+    // Create temporary directory for frames
+    createTempFrameDirectory();
 #endif
 }
 
@@ -51,13 +48,24 @@ ScreenCapture::~ScreenCapture() {
         stopRecording();
     }
 
-#ifdef WITH_FFMPEG
-    // Cleanup FFmpeg resources
-    cleanupRecording();
+    // Cleanup temporary files
+    cleanupTempFiles();
 
 #ifdef _WIN32
+    // Ensure FFmpeg process is terminated in destructor if still running
+    if (ffmpegProcessRunning) {
+        DWORD exitCode;
+        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+            if (exitCode == STILL_ACTIVE) {
+                TerminateProcess(processInfo.hProcess, 0);
+            }
+        }
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+        ffmpegProcessRunning = false;
+    }
+
     Gdiplus::GdiplusShutdown(gdiplusToken);
-#endif
 #endif
 }
 
@@ -75,7 +83,6 @@ std::string ScreenCapture::captureScreen() {
 }
 
 bool ScreenCapture::startRecording(const std::string& outputFilePath) {
-#ifdef WITH_FFMPEG
     if (isRecording) {
         std::cerr << "Recording is already in progress" << std::endl;
         return false;
@@ -90,11 +97,8 @@ bool ScreenCapture::startRecording(const std::string& outputFilePath) {
     }
 
     outputFile = finalOutputPath;
-
-    if (!initializeRecording(finalOutputPath)) {
-        std::cerr << "Failed to initialize recording" << std::endl;
-        return false;
-    }
+    frameCounter = 0;
+    // Note: We're no longer using capturedFrameFiles since we're using direct FFmpeg capture
 
     isRecording = true;
 
@@ -103,14 +107,9 @@ bool ScreenCapture::startRecording(const std::string& outputFilePath) {
 
     std::cout << "Started recording to: " << finalOutputPath << std::endl;
     return true;
-#else
-    std::cerr << "FFmpeg support not compiled in. Screen recording not available." << std::endl;
-    return false;
-#endif
 }
 
 bool ScreenCapture::stopRecording() {
-#ifdef WITH_FFMPEG
     if (!isRecording) {
         std::cout << "No recording in progress to stop" << std::endl;
         return true;
@@ -123,301 +122,244 @@ bool ScreenCapture::stopRecording() {
         recordingThread.join();
     }
 
-    // Write trailer and finalize
-    if (formatContext) {
-        av_write_trailer(formatContext);
+#ifdef _WIN32
+    // Terminate the FFmpeg process if it's running
+    if (ffmpegProcessRunning) {
+        // Try to terminate the process gracefully first
+        DWORD exitCode;
+        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+            if (exitCode == STILL_ACTIVE) {
+                // Process is still running, terminate it
+                if (TerminateProcess(processInfo.hProcess, 0)) {
+                    std::cout << "FFmpeg process terminated" << std::endl;
+                } else {
+                    std::cerr << "Failed to terminate FFmpeg process" << std::endl;
+                }
+            }
+        }
+
+        // Close handles
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+        ffmpegProcessRunning = false;
     }
+#endif
 
     std::cout << "Stopped recording" << std::endl;
     return true;
-#else
-    std::cout << "FFmpeg support not compiled in. Screen recording not available." << std::endl;
-    return false;
-#endif
 }
 
-#ifdef WITH_FFMPEG
-bool ScreenCapture::initializeRecording(const std::string& outputFilePath) {
-    AVCodec* codec = nullptr;
 
-    // Find the H.264 encoder
-    codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (!codec) {
-        std::cerr << "Could not find H.264 encoder" << std::endl;
-        return false;
-    }
-
-    // Allocate format context for MKV
-    avformat_alloc_output_context2(&formatContext, NULL, "matroska", outputFilePath.c_str());
-    if (!formatContext) {
-        std::cerr << "Could not create output context for MKV" << std::endl;
-        return false;
-    }
-
-    // Allocate video stream
-    AVStream* videoStream = avformat_new_stream(formatContext, NULL);
-    if (!videoStream) {
-        std::cerr << "Could not create video stream" << std::endl;
-        return false;
-    }
-
-    codecContext = avcodec_alloc_context3(codec);
-    if (!codecContext) {
-        std::cerr << "Could not allocate video codec context" << std::endl;
-        return false;
-    }
-
-    // Set codec context parameters
-    codecContext->width = screenWidth;
-    codecContext->height = screenHeight;
-    codecContext->time_base = {1, 30}; // 30 fps
-    codecContext->framerate = {30, 1};
-    codecContext->pix_fmt = AV_PIX_FMT_YUV420P;
-    codecContext->bit_rate = 2000000; // 2 Mbps
-
-    // Set encoding options
-    av_opt_set(codecContext->priv_data, "preset", "medium", 0);
-    av_opt_set(codecContext->priv_data, "crf", "23", 0);
-
-    // Open codec
-    if (avcodec_open2(codecContext, codec, NULL) < 0) {
-        std::cerr << "Could not open video codec" << std::endl;
-        return false;
-    }
-
-    // Assign the codec context to the video stream
-    videoStream->codecpar->format = codecContext->pix_fmt;
-    videoStream->codecpar->width = codecContext->width;
-    videoStream->codecpar->height = codecContext->height;
-    videoStream->codecpar->codec_id = codecContext->codec_id;
-    videoStream->codecpar->bit_rate = codecContext->bit_rate;
-    avcodec_parameters_from_context(videoStream->codecpar, codecContext);
-
-    // Allocate frame
-    videoFrame = av_frame_alloc();
-    if (!videoFrame) {
-        std::cerr << "Could not allocate video frame" << std::endl;
-        return false;
-    }
-
-    videoFrame->format = codecContext->pix_fmt;
-    videoFrame->width = codecContext->width;
-    videoFrame->height = codecContext->height;
-
-    // Allocate frame buffers
-    if (av_frame_get_buffer(videoFrame, 32) < 0) {
-        std::cerr << "Could not allocate frame buffers" << std::endl;
-        return false;
-    }
-
-    // Open output file
-    if (!(formatContext->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open(&formatContext->pb, outputFilePath.c_str(), AVIO_FLAG_WRITE) < 0) {
-            std::cerr << "Could not open output file" << std::endl;
-            return false;
-        }
-    }
-
-    // Write header
-    if (avformat_write_header(formatContext, NULL) < 0) {
-        std::cerr << "Could not write header to output file" << std::endl;
-        return false;
-    }
-
-    // Initialize sws context for color conversion
-    swsContext = sws_getContext(
-        screenWidth, screenHeight, AV_PIX_FMT_BGR24,
-        codecContext->width, codecContext->height, codecContext->pix_fmt,
-        SWS_BILINEAR, NULL, NULL, NULL
-    );
-
-    if (!swsContext) {
-        std::cerr << "Could not create SWScale context" << std::endl;
-        return false;
-    }
-
-    return true;
-}
 
 void ScreenCapture::recordingLoop() {
-    // Initialize the start time
-    auto startTime = std::chrono::high_resolution_clock::now();
-
-    // Main recording loop
-    while (isRecording) {
-        auto frameStartTime = std::chrono::high_resolution_clock::now();
-
-        // Capture a frame
-        if (captureFrameWindows()) {
-            // Encode the frame
-            encodeVideoFrame();
-        }
-
-        // Calculate how much time to sleep to maintain target FPS (30fps = ~33ms per frame)
-        auto frameEndTime = std::chrono::high_resolution_clock::now();
-        auto frameDuration = std::chrono::duration_cast<std::chrono::milliseconds>(frameEndTime - frameStartTime);
-
-        if (frameDuration.count() < 33) { // ~30 FPS
-            std::this_thread::sleep_for(std::chrono::milliseconds(33 - frameDuration.count()));
-        }
-    }
+    // For direct FFmpeg screen capture, we'll launch FFmpeg as a subprocess that captures directly
+    startFFmpegScreenCapture();
 }
 
-bool ScreenCapture::captureFrameWindows() {
+void ScreenCapture::startFFmpegScreenCapture() {
+    // Build the FFmpeg command for direct screen capture
 #ifdef _WIN32
+    std::string ffmpegCmd = "ffmpeg -f gdigrab -i desktop -c:v libx264 -crf 23 -preset ultrafast -y \"" + outputFile + "\"";
+#else
+    // For Linux/macOS, we'd use different parameters
+    #ifdef __linux__
+    std::string ffmpegCmd = "ffmpeg -f x11grab -i :0 -c:v libx264 -crf 23 -preset ultrafast -y \"" + outputFile + "\"";
+    #elif __APPLE__
+    std::string ffmpegCmd = "ffmpeg -f avfoundation -i \"1\" -c:v libx264 -crf 23 -preset ultrafast -y \"" + outputFile + "\"";
+    #else
+    std::cerr << "Screen capture not implemented for this platform" << std::endl;
+    return;
+    #endif
+#endif
+
+    // Execute the FFmpeg command as a subprocess using Win32 API to have better control
+#ifdef _WIN32
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    // Convert std::string to wide string for Windows
+    std::wstring wCmd(ffmpegCmd.begin(), ffmpegCmd.end());
+
+    // Create the process
+    if (!CreateProcessW(NULL,   // No module name (use command line)
+                        &wCmd[0], // Command line
+                        NULL,   // Process handle not inheritable
+                        NULL,   // Thread handle not inheritable
+                        FALSE,  // Handle inheritance
+                        CREATE_NO_WINDOW, // Creation flags to hide the window
+                        NULL,   // Use parent's environment block
+                        NULL,   // Use parent's starting directory
+                        &si,    // Pointer to STARTUPINFOW structure
+                        &pi)) { // Pointer to PROCESS_INFORMATION structure
+        std::cerr << "CreateProcess failed (" << GetLastError() << ")" << std::endl;
+        return;
+    }
+
+    // Store process info to potentially kill it later when stopRecording is called
+    processInfo = pi;
+    ffmpegProcessRunning = true;
+
+    // Don't close handles immediately - we need them to control the process
+    // We'll close them in stopRecording
+#else
+    // On Linux/Mac, we would use fork/exec or similar
+    // For now, use system() which is blocking - not ideal but works for this implementation
+    system(ffmpegCmd.c_str());
+#endif
+}
+
+#ifdef _WIN32
+bool ScreenCapture::captureFrameWindows(const std::string& filePath) {
     HDC hScreen = GetDC(NULL);
+    if (!hScreen) {
+        std::cerr << "Failed to get screen DC" << std::endl;
+        return false;
+    }
+
     HDC hDC = CreateCompatibleDC(hScreen);
+    if (!hDC) {
+        std::cerr << "Failed to create compatible DC" << std::endl;
+        ReleaseDC(NULL, hScreen);
+        return false;
+    }
 
     HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, screenWidth, screenHeight);
+    if (!hBitmap) {
+        std::cerr << "Failed to create compatible bitmap" << std::endl;
+        DeleteDC(hDC);
+        ReleaseDC(NULL, hScreen);
+        return false;
+    }
+
     HGDIOBJ old_obj = SelectObject(hDC, hBitmap);
+    if (!old_obj) {
+        std::cerr << "Failed to select bitmap object" << std::endl;
+        DeleteObject(hBitmap);
+        DeleteDC(hDC);
+        ReleaseDC(NULL, hScreen);
+        return false;
+    }
 
-    BitBlt(hDC, 0, 0, screenWidth, screenHeight, hScreen, 0, 0, SRCCOPY);
+    BOOL result = BitBlt(hDC, 0, 0, screenWidth, screenHeight, hScreen, 0, 0, SRCCOPY);
+    if (!result) {
+        std::cerr << "Failed to perform BitBlt" << std::endl;
+        SelectObject(hDC, old_obj);
+        DeleteObject(hBitmap);
+        DeleteDC(hDC);
+        ReleaseDC(NULL, hScreen);
+        return false;
+    }
 
-    // Get bitmap info
-    BITMAPINFOHEADER bmi = {0};
-    bmi.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.biWidth = screenWidth;
-    bmi.biHeight = -screenHeight; // Negative to get top-down bitmap
-    bmi.biPlanes = 1;
-    bmi.biBitCount = 24;
-    bmi.biCompression = BI_RGB;
+    // Save to BMP file using the same approach as the captureScreenWindows function
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = screenWidth;
+    bmi.bmiHeader.biHeight = -screenHeight; // Negative for top-down bitmap
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 24;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
-    // Allocate memory for raw pixel data
-    int rowSize = ((24 * screenWidth + 31) / 32) * 4; // Calculate row size in bytes
-    std::vector<uint8_t> pixels(screenHeight * rowSize);
-
-    // Get the raw pixel data
-    if (GetDIBits(hDC, hBitmap, 0, screenHeight, pixels.data(), (BITMAPINFO*)&bmi, DIB_RGB_COLORS) <= 0) {
+    std::vector<uint8_t> pixels(screenWidth * screenHeight * 3);
+    int scanlineSize = ((24 * screenWidth + 31) / 32) * 4; // Calculate actual scanline size
+    int pixelsGot = GetDIBits(hDC, hBitmap, 0, screenHeight, pixels.data(), (BITMAPINFO*)&bmi, DIB_RGB_COLORS);
+    if (pixelsGot <= 0) {
         std::cerr << "Failed to get DIBits" << std::endl;
         SelectObject(hDC, old_obj);
+        DeleteObject(hBitmap);
         DeleteDC(hDC);
         ReleaseDC(NULL, hScreen);
-        DeleteObject(hBitmap);
         return false;
     }
 
-    // Create an AVFrame to hold the raw image data
-    AVFrame* frame = av_frame_alloc();
-    if (!frame) {
-        std::cerr << "Could not allocate temporary frame" << std::endl;
+    // Create and write the BMP file manually
+    std::ofstream file(filePath, std::ios::binary);
+    if (file.is_open()) {
+        // BMP Header (14 bytes)
+        file.put('B'); file.put('M'); // Signature
+
+        // File size: header + (width * height * 3 bytes per pixel)
+        int headersSize = 54; // Size of all headers
+        int totalFileSize = headersSize + (screenWidth * screenHeight * 3);
+        file.write(reinterpret_cast<const char*>(&totalFileSize), 4); // File size
+
+        int reserved = 0;
+        file.write(reinterpret_cast<const char*>(&reserved), 2); // Reserved
+        file.write(reinterpret_cast<const char*>(&reserved), 2); // Reserved
+
+        int dataOffset = headersSize;
+        file.write(reinterpret_cast<const char*>(&dataOffset), 4); // Data offset
+
+        // DIB Header (40 bytes - BITMAPINFOHEADER)
+        int headerSize = 40;
+        file.write(reinterpret_cast<const char*>(&headerSize), 4); // Header size
+        file.write(reinterpret_cast<const char*>(&screenWidth), 4); // Width
+        file.write(reinterpret_cast<const char*>(&screenHeight), 4); // Height
+        file.put(1); file.put(0); // Planes
+        file.put(24); file.put(0); // Bits per pixel
+        int compression = 0; // BI_RGB
+        file.write(reinterpret_cast<const char*>(&compression), 4); // Compression
+        int imageSize = screenWidth * screenHeight * 3;
+        file.write(reinterpret_cast<const char*>(&imageSize), 4); // Image size
+        file.write(reinterpret_cast<const char*>(&reserved), 4); // Horizontal resolution
+        file.write(reinterpret_cast<const char*>(&reserved), 4); // Vertical resolution
+        file.write(reinterpret_cast<const char*>(&reserved), 4); // Colors used
+        file.write(reinterpret_cast<const char*>(&reserved), 4); // Important colors
+
+        // Write pixel data (RGB values, bottom to top due to BMP format)
+        for(int y = screenHeight - 1; y >= 0; y--) {
+            for(int x = 0; x < screenWidth; x++) {
+                int pixelIndex = (y * screenWidth + x) * 3;
+                // Write BGR (BMP format requires BGR order)
+                file.put(pixels[pixelIndex + 2]); // Blue
+                file.put(pixels[pixelIndex + 1]); // Green
+                file.put(pixels[pixelIndex]);     // Red
+            }
+        }
+
+        file.close();
+    } else {
+        std::cerr << "Failed to create file: " << filePath << std::endl;
         SelectObject(hDC, old_obj);
+        DeleteObject(hBitmap);
         DeleteDC(hDC);
         ReleaseDC(NULL, hScreen);
-        DeleteObject(hBitmap);
         return false;
     }
 
-    frame->width = screenWidth;
-    frame->height = screenHeight;
-    frame->format = AV_PIX_FMT_BGR24;
-
-    if (av_frame_get_buffer(frame, 32) < 0) {
-        std::cerr << "Could not allocate temporary frame buffer" << std::endl;
-        av_frame_free(&frame);
-        SelectObject(hDC, old_obj);
-        DeleteDC(hDC);
-        ReleaseDC(NULL, hScreen);
-        DeleteObject(hBitmap);
-        return false;
-    }
-
-    // Copy the pixel data to the frame
-    for (int y = 0; y < screenHeight; y++) {
-        memcpy(frame->data[0] + y * frame->linesize[0],
-               pixels.data() + y * rowSize,
-               screenWidth * 3);
-    }
-
-    // Convert the captured frame to the format needed by the encoder
-    sws_scale(swsContext,
-              frame->data, frame->linesize, 0, screenHeight,
-              videoFrame->data, videoFrame->linesize);
-
-    // Set frame properties
-    static int64_t frameCounter = 0;
-    videoFrame->pts = frameCounter++;
-
-    // Clean up
-    av_frame_free(&frame);
     SelectObject(hDC, old_obj);
+    DeleteObject(hBitmap);
     DeleteDC(hDC);
     ReleaseDC(NULL, hScreen);
-    DeleteObject(hBitmap);
 
     return true;
-#else
-    return false;
-#endif
-}
-
-bool ScreenCapture::encodeVideoFrame() {
-    AVPacket* packet = av_packet_alloc();
-    if (!packet) {
-        std::cerr << "Could not allocate packet" << std::endl;
-        return false;
-    }
-
-    // Encode the frame
-    int ret = avcodec_send_frame(codecContext, videoFrame);
-    if (ret < 0) {
-        std::cerr << "Error sending frame to encoder: " << av_err2str(ret) << std::endl;
-        av_packet_free(&packet);
-        return false;
-    }
-
-    // Receive encoded packets
-    while (ret >= 0) {
-        ret = avcodec_receive_packet(codecContext, packet);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            break;
-        } else if (ret < 0) {
-            std::cerr << "Error receiving packet from encoder: " << av_err2str(ret) << std::endl;
-            av_packet_free(&packet);
-            return false;
-        }
-
-        // Write the packet to the output file
-        packet->stream_index = 0; // First (and only) stream
-        av_packet_rescale_ts(packet, codecContext->time_base, formatContext->streams[0]->time_base);
-        ret = av_interleaved_write_frame(formatContext, packet);
-        if (ret < 0) {
-            std::cerr << "Error writing packet: " << av_err2str(ret) << std::endl;
-            av_packet_free(&packet);
-            return false;
-        }
-
-        av_packet_unref(packet);
-    }
-
-    av_packet_free(&packet);
-    return true;
-}
-
-void ScreenCapture::cleanupRecording() {
-    if (swsContext) {
-        sws_freeContext(swsContext);
-        swsContext = nullptr;
-    }
-
-    if (videoFrame) {
-        av_frame_free(&videoFrame);
-        videoFrame = nullptr;
-    }
-
-    if (codecContext) {
-        avcodec_free_context(&codecContext);
-        codecContext = nullptr;
-    }
-
-    if (formatContext) {
-        if (formatContext->pb) {
-            avio_closep(&formatContext->pb);
-        }
-        avformat_free_context(formatContext);
-        formatContext = nullptr;
-    }
 }
 #endif
+
+#ifdef __linux__
+bool ScreenCapture::captureFrameLinux(const std::string& filePath) {
+    // Placeholder implementation for Linux
+    // In a real implementation, you might use X11 capture libraries
+    // or call external utilities like scrot
+    std::cout << "Linux frame capture to: " << filePath << std::endl;
+    // This would be implemented using X11 screen capture
+    return false; // Placeholder
+}
+#endif
+
+#ifdef __APPLE__
+bool ScreenCapture::captureFrameMac(const std::string& filePath) {
+    // Placeholder implementation for macOS
+    // In a real implementation, you might use CGDisplay API
+    std::cout << "macOS frame capture to: " << filePath << std::endl;
+    // This would be implemented using macOS screen capture APIs
+    return false; // Placeholder
+}
+#endif
+
 
 void ScreenCapture::setScreenshotCallback(std::function<void(const std::string&)> callback) {
     screenshotCallback = callback;
@@ -621,6 +563,39 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
     return -1; // Failure
 }
 #endif
+
+void ScreenCapture::createTempFrameDirectory() {
+    // Create temporary directory for frame storage
+    std::filesystem::create_directories(tempFrameDir);
+}
+
+void ScreenCapture::cleanupTempFiles() {
+    // Remove all temporary frame files
+    for (const auto& frameFile : capturedFrameFiles) {
+        std::filesystem::remove(frameFile);
+    }
+
+    // Remove the temporary directory
+    std::filesystem::remove_all(tempFrameDir);
+}
+
+void ScreenCapture::encodeVideoWithExternalFFmpeg() {
+    if (capturedFrameFiles.empty()) {
+        return;
+    }
+
+    // Build the FFmpeg command to create the video from captured frames
+    std::string ffmpegCmd = "ffmpeg -y -framerate 30 -i \"" + tempFrameDir + "/frame_%06d.bmp\" -c:v libx264 -pix_fmt yuv420p -preset medium -crf 23 \"" + outputFile + "\"";
+
+    // Execute the command
+    int result = system(ffmpegCmd.c_str());
+
+    if (result == 0) {
+        std::cout << "Successfully created video: " << outputFile << std::endl;
+    } else {
+        std::cerr << "Failed to create video using FFmpeg" << std::endl;
+    }
+}
 
 #ifdef __linux__
 std::string ScreenCapture::captureScreenLinux() {

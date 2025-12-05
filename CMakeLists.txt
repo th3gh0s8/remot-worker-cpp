@@ -41,19 +41,73 @@ if(ENABLE_FFMPEG)
         endif()
     endif()
 
-    # If no FFmpeg found, use FetchContent to build it
+    # If no FFmpeg found, try looking for it in common locations
     if(NOT FFMPEG_FOUND)
-        message(STATUS "FFmpeg not found, will fetch and build it")
-        include(FetchContent)
-        FetchContent_Declare(
-            ffmpeg
-            GIT_REPOSITORY https://git.ffmpeg.org/FFmpeg.git
-            GIT_TAG n5.1.2
+        # Check for FFmpeg in common install locations
+        find_path(FFMPEG_INCLUDE_DIR libavcodec/avcodec.h
+            PATHS
+                ${CMAKE_CURRENT_SOURCE_DIR}/libs/ffmpeg/include
+                $ENV{FFMPEG_ROOT}/include
+                $ENV{PROGRAMFILES}/ffmpeg/include
+                C:/ffmpeg/include
+                /usr/local/include
+                /usr/include
         )
-        # Note: Building FFmpeg from source is complex and time-consuming
-        # It's better to provide a fallback
-        message(WARNING "Building FFmpeg from source is complex. Using placeholder.")
-        set(WITH_FFMPEG OFF)  # For now, just disable if not found
+
+        if(FFMPEG_INCLUDE_DIR)
+            set(FFMPEG_FOUND TRUE)
+            set(WITH_FFMPEG ON)
+            set(AVCODEC_INCLUDE_DIRS ${FFMPEG_INCLUDE_DIR})
+            set(AVFORMAT_INCLUDE_DIRS ${FFMPEG_INCLUDE_DIR})
+            set(AVUTIL_INCLUDE_DIRS ${FFMPEG_INCLUDE_DIR})
+            set(SWSCALE_INCLUDE_DIRS ${FFMPEG_INCLUDE_DIR})
+
+            # Try to find libraries
+            find_library(AVCODEC_LIBRARY avcodec
+                PATHS
+                    ${CMAKE_CURRENT_SOURCE_DIR}/libs/ffmpeg/lib
+                    $ENV{FFMPEG_ROOT}/lib
+                    $ENV{PROGRAMFILES}/ffmpeg/lib
+                    C:/ffmpeg/lib
+                    /usr/local/lib
+                    /usr/lib
+            )
+            find_library(AVFORMAT_LIBRARY avformat
+                PATHS
+                    ${CMAKE_CURRENT_SOURCE_DIR}/libs/ffmpeg/lib
+                    $ENV{FFMPEG_ROOT}/lib
+                    $ENV{PROGRAMFILES}/ffmpeg/lib
+                    C:/ffmpeg/lib
+                    /usr/local/lib
+                    /usr/lib
+            )
+            find_library(AVUTIL_LIBRARY avutil
+                PATHS
+                    ${CMAKE_CURRENT_SOURCE_DIR}/libs/ffmpeg/lib
+                    $ENV{FFMPEG_ROOT}/lib
+                    $ENV{PROGRAMFILES}/ffmpeg/lib
+                    C:/ffmpeg/lib
+                    /usr/local/lib
+                    /usr/lib
+            )
+            find_library(SWSCALE_LIBRARY swscale
+                PATHS
+                    ${CMAKE_CURRENT_SOURCE_DIR}/libs/ffmpeg/lib
+                    $ENV{FFMPEG_ROOT}/lib
+                    $ENV{PROGRAMFILES}/ffmpeg/lib
+                    C:/ffmpeg/lib
+                    /usr/local/lib
+                    /usr/lib
+            )
+
+            set(AVCODEC_LIBRARIES ${AVCODEC_LIBRARY})
+            set(AVFORMAT_LIBRARIES ${AVFORMAT_LIBRARY})
+            set(AVUTIL_LIBRARIES ${AVUTIL_LIBRARY})
+            set(SWSCALE_LIBRARIES ${SWSCALE_LIBRARY})
+        else()
+            message(STATUS "FFmpeg not found in common locations, screen recording will be disabled")
+            set(WITH_FFMPEG OFF)
+        endif()
     endif()
 else()
     message(STATUS "FFmpeg support disabled by user option")
@@ -97,12 +151,22 @@ add_executable(${PROJECT_NAME}
     libs/imgui/backends/imgui_impl_opengl3.cpp
 )
 
+# Define NO_TRAY_LIBRARY to disable tray functionality until properly configured
+target_compile_definitions(${PROJECT_NAME} PRIVATE NO_TRAY_LIBRARY)
+
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/libs/imgui
     ${PROJECT_SOURCE_DIR}/libs/mysql-connector-c/include
 )
+
+# Platform specific includes
+if(WIN32)
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${PROJECT_SOURCE_DIR}/build/_deps/glfw-src/include
+    )
+endif()
 
 # Define WITH_FFMPEG compile definition
 if(DEFINED WITH_FFMPEG AND WITH_FFMPEG)
