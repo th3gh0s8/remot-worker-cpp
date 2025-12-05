@@ -36,7 +36,7 @@ void LoginScreen::render() {
                 
                 // Create database manager and try to validate user
                 DatabaseManager dbManager;
-                if (dbManager.connect("your-mysql-server.com", "username", "password", "worker_db")) {
+                if (dbManager.connect("localhost", "root", "", "worker_db")) {
                     if (dbManager.validateUser(userId)) {
                         loginSuccessful = true;
                     } else {

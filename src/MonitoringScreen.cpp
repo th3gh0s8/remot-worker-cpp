@@ -140,12 +140,12 @@ void MonitoringScreen::startRandomScreenshotTimer() {
             if (!screenshotPath.empty()) {
                 // Upload screenshot
                 FileUploader uploader;
-                uploader.setServerCredentials("your-file-server.com", "username", "password");
+                uploader.setServerCredentials("localhost", "root", "");
                 uploader.uploadFile(screenshotPath, "/screenshots/" + userId + "/");
                 
                 // Record to database
                 DatabaseManager dbManager;
-                dbManager.connect("your-mysql-server.com", "username", "password", "worker_db");
+                dbManager.connect("localhost", "root", "", "worker_db");
                 dbManager.insertActivityData(userId, "screenshot_taken");
                 
                 statusMessage = "Screenshot taken and uploaded: " + screenshotPath;
