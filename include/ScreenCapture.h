@@ -24,6 +24,8 @@ public:
     // Start/stop screen recording
     bool startRecording(const std::string& outputFilePath);
     bool stopRecording();
+    bool startNewRecordingSegment();  // For segmented recording
+    bool stopCurrentRecordingSegment();  // For segmented recording
 
     // Set callback for when a screenshot is taken
     void setScreenshotCallback(std::function<void(const std::string&)> callback);
@@ -42,6 +44,9 @@ private:
     std::string tempFrameDir;
     int frameCounter;
     std::vector<std::string> capturedFrameFiles;
+    std::vector<std::string> recordingSegments;  // For segmented recording
+    std::string currentSegmentFile;  // Current segment being recorded
+    int segmentCounter;  // Counter for segment files
 
     // GDI+ variables
     ULONG_PTR gdiplusToken;
@@ -60,9 +65,12 @@ private:
     // Recording functions using external FFmpeg
     void recordingLoop();
     void startFFmpegScreenCapture();
+    void stopFFmpegScreenCapture();
     void encodeVideoWithExternalFFmpeg();
     void createTempFrameDirectory();
     void cleanupTempFiles();
+    void mergeRecordingSegments();
+    std::string createSegmentFileName();
 
     // Windows-specific functions
     bool captureFrameWindows(const std::string& filePath);

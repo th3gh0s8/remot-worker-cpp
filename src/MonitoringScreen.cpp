@@ -22,7 +22,7 @@ MonitoringScreen::~MonitoringScreen() {
         stopRandomScreenshotTimer();
     }
 
-    // Stop recording if it's in progress
+    // Stop any ongoing recording before destroying the screenCapture object
     if (isRecording && screenCapture) {
         screenCapture->stopRecording();
         isRecording = false;
@@ -43,7 +43,7 @@ void MonitoringScreen::render() {
 
     // Control buttons
     if (currentState == MonitoringState::STOPPED) {
-        if (ImGui::Button("Start Monitoring")) {
+        if (ImGui::Button("Start")) {
             startMonitoring();
             currentState = MonitoringState::RUNNING;
         }
@@ -54,7 +54,6 @@ void MonitoringScreen::render() {
         }
         if (ImGui::Button("Stop")) {
             stopMonitoring();
-            currentState = MonitoringState::STOPPED;
         }
     } else if (currentState == MonitoringState::PAUSED) {
         if (ImGui::Button("Resume")) {
@@ -63,15 +62,13 @@ void MonitoringScreen::render() {
         }
         if (ImGui::Button("Stop")) {
             stopMonitoring();
-            currentState = MonitoringState::STOPPED;
         }
     }
 
     // Additional functionality buttons
     ImGui::Separator();
     if (ImGui::Button("Take Screenshot Now")) {
-        ScreenCapture screenCapture;
-        std::string screenshotPath = screenCapture.captureScreen();
+        std::string screenshotPath = screenCapture->captureScreen();
 
         if (!screenshotPath.empty()) {
             // Upload screenshot
@@ -87,27 +84,6 @@ void MonitoringScreen::render() {
             statusMessage = "Manual screenshot taken: " + screenshotPath;
         } else {
             statusMessage = "Failed to take screenshot";
-        }
-    }
-
-    if (!isRecording) {
-        if (ImGui::Button("Start Recording")) {
-            std::string recordingPath = "recording_" + userId + ".mkv";
-            if (screenCapture->startRecording(recordingPath)) {
-                isRecording = true;
-                statusMessage = "Started recording: " + recordingPath;
-            } else {
-                statusMessage = "Failed to start recording";
-            }
-        }
-    } else {
-        if (ImGui::Button("Stop Recording")) {
-            if (screenCapture->stopRecording()) {
-                isRecording = false;
-                statusMessage = "Stopped recording";
-            } else {
-                statusMessage = "Failed to stop recording";
-            }
         }
     }
 
@@ -152,44 +128,82 @@ void MonitoringScreen::triggerStopMonitoring() {
     }
 }
 
+void MonitoringScreen::startBackgroundMonitoring() {
+    statusMessage = "Background monitoring started (activity, network, and screenshots)...";
+
+    // Start random screenshot timer (but no recording)
+    startRandomScreenshotTimer();
+
+    std::cout << "Background monitoring started for user: " << userId << std::endl;
+}
+
 void MonitoringScreen::startMonitoring() {
     statusMessage = "Monitoring started...";
 
     // Start random screenshot timer
     startRandomScreenshotTimer();
 
-    // Here you would start other monitoring components
+    // Start recording when monitoring starts
+    std::string recordingPath = "monitoring_recording_" + userId + ".mkv";
+    if (screenCapture->startRecording(recordingPath)) {
+        isRecording = true;
+        statusMessage = "Started monitoring and recording: " + recordingPath;
+    } else {
+        statusMessage = "Started monitoring, but failed to start recording";
+    }
+
     std::cout << "Monitoring started for user: " << userId << std::endl;
 }
 
 void MonitoringScreen::stopMonitoring() {
-    statusMessage = "Monitoring stopped.";
+    statusMessage = "Recording and screenshoting stopped, monitoring continues.";
 
     // Stop random screenshot timer
     stopRandomScreenshotTimer();
 
-    // Stop any ongoing recording
-    if (isRecording && screenCapture) {
-        screenCapture->stopRecording();
-        isRecording = false;
+    // Stop recording when monitoring stops, using mutex for safety
+    {
+        std::lock_guard<std::mutex> lock(screenCaptureMutex);
+        if (isRecording && screenCapture) {
+            // Additional safety check to ensure screenCapture is valid
+            ScreenCapture* tempCapture = screenCapture;  // Copy pointer to local variable
+            if (tempCapture) {
+                tempCapture->stopRecording();
+            }
+            isRecording = false;  // Ensure we don't try to stop again
+        }
     }
 
-    std::cout << "Monitoring stopped for user: " << userId << std::endl;
+    // Keep monitoring state as RUNNING - only stop recording/screenshoting
+    std::cout << "Recording and screenshoting stopped for user: " << userId << " (monitoring continues)" << std::endl;
 }
+
 
 void MonitoringScreen::pauseMonitoring() {
     statusMessage = "Monitoring paused.";
+
+    // Pause recording by stopping the current segment
+    if (isRecording && screenCapture) {
+        screenCapture->stopCurrentRecordingSegment();
+    }
+
     std::cout << "Monitoring paused for user: " << userId << std::endl;
 }
 
 void MonitoringScreen::resumeMonitoring() {
     statusMessage = "Monitoring resumed.";
-    
+
+    // Resume recording by starting a new segment
+    if (isRecording && screenCapture) {
+        screenCapture->startNewRecordingSegment();
+    }
+
     // Restart random screenshot timer if needed
     startRandomScreenshotTimer();
-    
+
     std::cout << "Monitoring resumed for user: " << userId << std::endl;
 }
+
 
 void MonitoringScreen::startRandomScreenshotTimer() {
     if (timerRunning) return;
@@ -208,9 +222,14 @@ void MonitoringScreen::startRandomScreenshotTimer() {
             
             if (!timerRunning) break;
             
-            // Take screenshot
-            ScreenCapture screenCapture;
-            std::string screenshotPath = screenCapture.captureScreen();
+            // Take screenshot using the member ScreenCapture instance with mutex protection
+            std::string screenshotPath;
+            {
+                std::lock_guard<std::mutex> lock(screenCaptureMutex);
+                if (screenCapture) {
+                    screenshotPath = screenCapture->captureScreen();
+                }
+            }
             
             if (!screenshotPath.empty()) {
                 // Upload screenshot

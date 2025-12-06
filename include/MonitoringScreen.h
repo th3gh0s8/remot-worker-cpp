@@ -20,6 +20,7 @@ public:
     // Public methods to control monitoring externally (for system tray)
     void triggerStartMonitoring();
     void triggerStopMonitoring();
+    void startBackgroundMonitoring();  // Start only background monitoring (activity/network) without recording/screenshots
 
 private:
     std::string userId;
@@ -30,6 +31,9 @@ private:
     // For the random screenshot timer
     std::thread screenshotTimerThread;
     std::atomic<bool> timerRunning;
+
+    // Mutex to protect shared resources between threads
+    std::mutex screenCaptureMutex;
 
     // For screen recording functionality
     ScreenCapture* screenCapture;

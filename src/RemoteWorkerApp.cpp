@@ -70,6 +70,11 @@ void RemoteWorkerApp::initialize() {
         std::cerr << "Failed to create GLFW window" << std::endl;
         return;
     }
+
+    // Set a close callback to hide the window instead of closing when X is clicked
+    glfwSetWindowCloseCallback(window, [](GLFWwindow* win) {
+        glfwHideWindow(win);
+    });
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // Enable vsync
 
@@ -94,6 +99,17 @@ void RemoteWorkerApp::initialize() {
     setupSystemTray();
 #endif
 #endif
+
+    // Start monitoring automatically on app start, but don't trigger recording yet
+    // This starts the monitoring functionality (activity tracking, network usage)
+    // without necessarily starting the recording or screenshot functions
+    currentState = AppState::MONITORING; // Set state to monitoring
+    if (monitoringScreen) {
+        // Set a default userId if needed, or we could implement auto-start with monitoring
+        monitoringScreen->setUserId("system"); // Use system as default to start monitoring
+        // Start the background monitoring processes without starting recording or screenshots
+        monitoringScreen->startBackgroundMonitoring();
+    }
 }
 
 #ifndef NO_TRAY_LIBRARY
@@ -112,7 +128,9 @@ void RemoteWorkerApp::trayCallback(struct tray_menu* menu) {
             app->monitoringScreen->triggerStopMonitoring();
         }
     } else if (strcmp(menu->text, "Exit") == 0) {
-        glfwSetWindowShouldClose(app->window, GLFW_TRUE);
+        // Instead of fully exiting, just hide the window
+        // The monitoring will continue running in the background
+        glfwHideWindow(app->window);
     }
 }
 
@@ -188,14 +206,21 @@ void RemoteWorkerApp::run() {
     std::cout << "Remote Worker App starting..." << std::endl;
 
     // Main loop
-    while (!glfwWindowShouldClose(window)) {
+    while (true) {
         glfwPollEvents();
 
-        // Handle window minimized
+        // Check if we should exit only through explicit menu selection
+        // Window close events should just hide the window, not exit
+        int shouldClose = glfwWindowShouldClose(window);
+
+        // Only render if window is visible
         int width, height;
         glfwGetWindowSize(window, &width, &height);
-        if (width > 0 && height > 0) {
+        if (width > 0 && height > 0 && !shouldClose) {
             render();
         }
+
+        // Add a small delay to prevent excessive CPU usage
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }

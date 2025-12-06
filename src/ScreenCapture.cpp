@@ -25,7 +25,8 @@
 #endif
 
 ScreenCapture::ScreenCapture() :
-    isRecording(false), screenshotCallback(nullptr), recordingThread(), tempFrameDir("temp_frames"), gdiplusToken(0) {
+    isRecording(false), screenshotCallback(nullptr), recordingThread(), tempFrameDir("temp_frames"),
+    frameCounter(0), segmentCounter(0), gdiplusToken(0) {
 #ifdef _WIN32
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
@@ -33,6 +34,10 @@ ScreenCapture::ScreenCapture() :
     // Initialize process info
     memset(&processInfo, 0, sizeof(PROCESS_INFORMATION));
     ffmpegProcessRunning = false;
+
+    // Initialize segmentation
+    currentSegmentFile = "";
+    recordingSegments.clear();
 
     // Get screen dimensions
     screenWidth = GetSystemMetrics(SM_CXSCREEN);
@@ -55,13 +60,13 @@ ScreenCapture::~ScreenCapture() {
     // Ensure FFmpeg process is terminated in destructor if still running
     if (ffmpegProcessRunning) {
         DWORD exitCode;
-        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+        if (processInfo.hProcess && GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
             if (exitCode == STILL_ACTIVE) {
                 TerminateProcess(processInfo.hProcess, 0);
             }
         }
-        CloseHandle(processInfo.hProcess);
-        CloseHandle(processInfo.hThread);
+        if (processInfo.hProcess) CloseHandle(processInfo.hProcess);
+        if (processInfo.hThread) CloseHandle(processInfo.hThread);
         ffmpegProcessRunning = false;
     }
 
@@ -98,14 +103,177 @@ bool ScreenCapture::startRecording(const std::string& outputFilePath) {
 
     outputFile = finalOutputPath;
     frameCounter = 0;
-    // Note: We're no longer using capturedFrameFiles since we're using direct FFmpeg capture
+    segmentCounter = 0;  // Reset segment counter
+    recordingSegments.clear();  // Clear any previous segments
 
     isRecording = true;
 
-    // Start recording thread
-    recordingThread = std::thread(&ScreenCapture::recordingLoop, this);
+    // Create the first segment and start recording to it
+    currentSegmentFile = createSegmentFileName();
+
+    // Build the FFmpeg command for direct screen capture to segment file
+#ifdef _WIN32
+    std::string ffmpegCmd = "ffmpeg -f gdigrab -i desktop -c:v libx264 -crf 23 -preset ultrafast -tune zerolatency -y \"" + currentSegmentFile + "\"";
+#else
+    // For Linux/macOS, we'd use different parameters
+    #ifdef __linux__
+    std::string ffmpegCmd = "ffmpeg -f x11grab -i :0 -c:v libx264 -crf 23 -preset ultrafast -y \"" + currentSegmentFile + "\"";
+    #elif __APPLE__
+    std::string ffmpegCmd = "ffmpeg -f avfoundation -i \"1\" -c:v libx264 -crf 23 -preset ultrafast -y \"" + currentSegmentFile + "\"";
+    #else
+    std::cerr << "Screen capture not implemented for this platform" << std::endl;
+    return false;
+    #endif
+#endif
+
+    // Execute the FFmpeg command as a subprocess using Win32 API to have better control
+#ifdef _WIN32
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    // Convert std::string to wide string for Windows
+    std::wstring wCmd(ffmpegCmd.begin(), ffmpegCmd.end());
+
+    // Create the process
+    if (!CreateProcessW(NULL,   // No module name (use command line)
+                        &wCmd[0], // Command line
+                        NULL,   // Process handle not inheritable
+                        NULL,   // Thread handle not inheritable
+                        FALSE,  // Handle inheritance
+                        CREATE_NO_WINDOW, // Creation flags to hide the window
+                        NULL,   // Use parent's environment block
+                        NULL,   // Use parent's starting directory
+                        &si,    // Pointer to STARTUPINFOW structure
+                        &pi)) { // Pointer to PROCESS_INFORMATION structure
+        std::cerr << "CreateProcess failed (" << GetLastError() << ")" << std::endl;
+        isRecording = false;
+        return false;
+    }
+
+    // Store process info to potentially kill it later
+    processInfo = pi;
+    ffmpegProcessRunning = true;
+
+    // Add this segment to the list of segments
+    recordingSegments.push_back(currentSegmentFile);
 
     std::cout << "Started recording to: " << finalOutputPath << std::endl;
+    return true;
+#else
+    // On Linux/Mac, we would use fork/exec or similar
+    // For now, use system() which is blocking - not ideal but works for this implementation
+    int result = system(ffmpegCmd.c_str());
+    if (result == 0) {
+        // Add this segment to the list of segments
+        recordingSegments.push_back(currentSegmentFile);
+        std::cout << "Started recording to: " << finalOutputPath << std::endl;
+        return true;
+    } else {
+        isRecording = false;
+        return false;
+    }
+#endif
+}
+
+bool ScreenCapture::startNewRecordingSegment() {
+    // Create a new segment file name
+    currentSegmentFile = createSegmentFileName();
+
+    // Build the FFmpeg command for direct screen capture to segment file
+#ifdef _WIN32
+    std::string ffmpegCmd = "ffmpeg -f gdigrab -i desktop -c:v libx264 -crf 23 -preset ultrafast -tune zerolatency -y \"" + currentSegmentFile + "\"";
+#else
+    // For Linux/macOS, we'd use different parameters
+    #ifdef __linux__
+    std::string ffmpegCmd = "ffmpeg -f x11grab -i :0 -c:v libx264 -crf 23 -preset ultrafast -y \"" + currentSegmentFile + "\"";
+    #elif __APPLE__
+    std::string ffmpegCmd = "ffmpeg -f avfoundation -i \"1\" -c:v libx264 -crf 23 -preset ultrafast -y \"" + currentSegmentFile + "\"";
+    #else
+    std::cerr << "Screen capture not implemented for this platform" << std::endl;
+    return false;
+    #endif
+#endif
+
+    // Execute the FFmpeg command as a subprocess using Win32 API to have better control
+#ifdef _WIN32
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    // Convert std::string to wide string for Windows
+    std::wstring wCmd(ffmpegCmd.begin(), ffmpegCmd.end());
+
+    // Create the process
+    if (!CreateProcessW(NULL,   // No module name (use command line)
+                        &wCmd[0], // Command line
+                        NULL,   // Process handle not inheritable
+                        NULL,   // Thread handle not inheritable
+                        FALSE,  // Handle inheritance
+                        CREATE_NO_WINDOW, // Creation flags to hide the window
+                        NULL,   // Use parent's environment block
+                        NULL,   // Use parent's starting directory
+                        &si,    // Pointer to STARTUPINFOW structure
+                        &pi)) { // Pointer to PROCESS_INFORMATION structure
+        std::cerr << "CreateProcess failed (" << GetLastError() << ")" << std::endl;
+        return false;
+    }
+
+    // Store process info to potentially kill it later
+    processInfo = pi;
+    ffmpegProcessRunning = true;
+
+    // Add this segment to the list of segments
+    recordingSegments.push_back(currentSegmentFile);
+
+    return true;
+#else
+    // On Linux/Mac, we would use fork/exec or similar
+    // For now, use system() which is blocking - not ideal but works for this implementation
+    int result = system(ffmpegCmd.c_str());
+    if (result == 0) {
+        // Add this segment to the list of segments
+        recordingSegments.push_back(currentSegmentFile);
+        return true;
+    } else {
+        return false;
+    }
+#endif
+}
+
+bool ScreenCapture::stopCurrentRecordingSegment() {
+    if (!ffmpegProcessRunning) {
+        return true; // Nothing to stop
+    }
+
+#ifdef _WIN32
+    // Terminate the FFmpeg process if it's running
+    if (processInfo.hProcess) {
+        DWORD exitCode;
+        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+            if (exitCode == STILL_ACTIVE) {
+                // Process is still running, terminate it
+                if (TerminateProcess(processInfo.hProcess, 0)) {
+                    std::cout << "FFmpeg process terminated for current segment" << std::endl;
+                } else {
+                    std::cerr << "Failed to terminate FFmpeg process for current segment" << std::endl;
+                }
+            }
+        }
+
+        // Close handles (only once and mark as not running)
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+    }
+    ffmpegProcessRunning = false;
+#endif
+
     return true;
 }
 
@@ -117,33 +285,11 @@ bool ScreenCapture::stopRecording() {
 
     isRecording = false;
 
-    // Wait for recording thread to finish
-    if (recordingThread.joinable()) {
-        recordingThread.join();
-    }
+    // Stop current recording segment
+    stopCurrentRecordingSegment();
 
-#ifdef _WIN32
-    // Terminate the FFmpeg process if it's running
-    if (ffmpegProcessRunning) {
-        // Try to terminate the process gracefully first
-        DWORD exitCode;
-        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
-            if (exitCode == STILL_ACTIVE) {
-                // Process is still running, terminate it
-                if (TerminateProcess(processInfo.hProcess, 0)) {
-                    std::cout << "FFmpeg process terminated" << std::endl;
-                } else {
-                    std::cerr << "Failed to terminate FFmpeg process" << std::endl;
-                }
-            }
-        }
-
-        // Close handles
-        CloseHandle(processInfo.hProcess);
-        CloseHandle(processInfo.hThread);
-        ffmpegProcessRunning = false;
-    }
-#endif
+    // Merge all segments into the final output file
+    mergeRecordingSegments();
 
     std::cout << "Stopped recording" << std::endl;
     return true;
@@ -564,6 +710,13 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
 }
 #endif
 
+std::string ScreenCapture::createSegmentFileName() {
+    std::stringstream segmentName;
+    segmentName << tempFrameDir << "/segment_" << std::setfill('0') << std::setw(3) << segmentCounter << ".mkv";
+    segmentCounter++;
+    return segmentName.str();
+}
+
 void ScreenCapture::createTempFrameDirectory() {
     // Create temporary directory for frame storage
     std::filesystem::create_directories(tempFrameDir);
@@ -575,8 +728,69 @@ void ScreenCapture::cleanupTempFiles() {
         std::filesystem::remove(frameFile);
     }
 
+    // Remove all segment files
+    for (const auto& segmentFile : recordingSegments) {
+        std::filesystem::remove(segmentFile);
+    }
+
     // Remove the temporary directory
     std::filesystem::remove_all(tempFrameDir);
+}
+
+void ScreenCapture::stopFFmpegScreenCapture() {
+#ifdef _WIN32
+    // Terminate the FFmpeg process if it's running
+    if (ffmpegProcessRunning) {
+        DWORD exitCode;
+        if (GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+            if (exitCode == STILL_ACTIVE) {
+                // Process is still running, terminate it
+                if (TerminateProcess(processInfo.hProcess, 0)) {
+                    std::cout << "FFmpeg process terminated" << std::endl;
+                } else {
+                    std::cerr << "Failed to terminate FFmpeg process" << std::endl;
+                }
+            }
+        }
+
+        // Close handles
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+        ffmpegProcessRunning = false;
+    }
+#endif
+}
+
+void ScreenCapture::mergeRecordingSegments() {
+    if (recordingSegments.size() <= 1) {
+        // If there's only one segment or none, just rename it to the final output
+        if (recordingSegments.size() == 1) {
+            std::filesystem::rename(recordingSegments[0], outputFile);
+        }
+        return;
+    }
+
+    // Create a file listing all segments for FFmpeg to concatenate
+    std::string listFile = tempFrameDir + "/segments_list.txt";
+    std::ofstream list(listFile);
+
+    for (const auto& segment : recordingSegments) {
+        list << "file '" << segment << "'\n";
+    }
+    list.close();
+
+    // Use FFmpeg to concatenate all segments
+    std::string ffmpegCmd = "ffmpeg -f concat -safe 0 -i \"" + listFile + "\" -c copy -y \"" + outputFile + "\"";
+    int result = system(ffmpegCmd.c_str());
+
+    if (result == 0) {
+        std::cout << "Successfully merged " << recordingSegments.size() << " segments into " << outputFile << std::endl;
+    } else {
+        std::cerr << "Failed to merge recording segments" << std::endl;
+    }
+
+    // Clean up the list file
+    std::filesystem::remove(listFile);
 }
 
 void ScreenCapture::encodeVideoWithExternalFFmpeg() {
